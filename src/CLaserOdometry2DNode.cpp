@@ -18,7 +18,9 @@
 #include "rf2o_laser_odometry/CLaserOdometry2D.h"
 
 #include <tf/transform_broadcaster.h>
-#include <tf/transform_listener.h>
+#include <tf2_ros/transform_listener.h>
+#include <geometry_msgs/TransformStamped.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 
 namespace rf2o {
 
@@ -42,6 +44,7 @@ public:
 
   std::string         laser_scan_topic;
   std::string         odom_topic;
+  std::string         laser_frame_id;
   std::string         base_frame_id;
   std::string         odom_frame_id;
   std::string         init_pose_from_topic;
@@ -49,7 +52,8 @@ public:
   ros::NodeHandle             n;
   sensor_msgs::LaserScan      last_scan;
   bool                        GT_pose_initialized;
-  tf::TransformListener       tf_listener;          //Do not put inside the callback
+  tf2_ros::Buffer tfBuffer;
+  tf2_ros::TransformListener tfListener;
   tf::TransformBroadcaster    odom_broadcaster;
   nav_msgs::Odometry          initial_robot_pose;
 
@@ -65,7 +69,8 @@ public:
 };
 
 CLaserOdometry2DNode::CLaserOdometry2DNode() :
-  CLaserOdometry2D()
+  CLaserOdometry2D(),
+  tfListener(tfBuffer)
 {
   ROS_INFO("Initializing RF2O node...");
 
@@ -74,8 +79,9 @@ CLaserOdometry2DNode::CLaserOdometry2DNode() :
   ros::NodeHandle pn("~");
   pn.param<std::string>("laser_scan_topic",laser_scan_topic,"/laser_scan");
   pn.param<std::string>("odom_topic", odom_topic, "/odom_rf2o");
-  pn.param<std::string>("base_frame_id", base_frame_id, "/base_link");
-  pn.param<std::string>("odom_frame_id", odom_frame_id, "/odom");
+  pn.param<std::string>("laser_frame_id", laser_frame_id, "laser");
+  pn.param<std::string>("base_frame_id", base_frame_id, "base_link");
+  pn.param<std::string>("odom_frame_id", odom_frame_id, "odom");
   pn.param<bool>("publish_tf", publish_tf, true);
   pn.param<std::string>("init_pose_from_topic", init_pose_from_topic, "/base_pose_ground_truth");
   pn.param<double>("freq",freq,10.0);
@@ -119,23 +125,28 @@ bool CLaserOdometry2DNode::setLaserPoseFromTf()
 
   // Set laser pose on the robot (through tF)
   // This allow estimation of the odometry with respect to the robot base reference system.
-  tf::StampedTransform transform;
-  transform.setIdentity();
+  geometry_msgs::TransformStamped transformStamped;
   try
   {
-    tf_listener.lookupTransform(base_frame_id, last_scan.header.frame_id, ros::Time(0), transform);
+    ROS_WARN_STREAM("base_frame_id: " << base_frame_id);
+    ROS_WARN_STREAM("target: " << laser_frame_id);
+    transformStamped = tfBuffer.lookupTransform(base_frame_id, laser_frame_id, ros::Time(0), ros::Duration(10.0));
     retrieved = true;
   }
   catch (tf::TransformException &ex)
   {
-    ROS_ERROR("%s",ex.what());
+    ROS_FATAL("%s",ex.what());
     ros::Duration(1.0).sleep();
     retrieved = false;
   }
 
   //TF:transform -> Eigen::Isometry3d
 
-  const tf::Matrix3x3 &basis = transform.getBasis();
+  tf2::Quaternion quad;
+  tf2::convert(transformStamped.transform.rotation, quad);
+  
+  tf2::Matrix3x3 basis(quad);
+
   Eigen::Matrix3d R;
 
   for(int r = 0; r < 3; r++)
@@ -144,10 +155,9 @@ bool CLaserOdometry2DNode::setLaserPoseFromTf()
 
   Pose3d laser_tf(R);
 
-  const tf::Vector3 &t = transform.getOrigin();
-  laser_tf.translation()(0) = t[0];
-  laser_tf.translation()(1) = t[1];
-  laser_tf.translation()(2) = t[2];
+  laser_tf.translation()(0) = transformStamped.transform.translation.x;
+  laser_tf.translation()(1) = transformStamped.transform.translation.y;
+  laser_tf.translation()(2) = transformStamped.transform.translation.z;
 
   setLaserPose(laser_tf);
 
